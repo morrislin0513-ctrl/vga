@@ -1,131 +1,156 @@
+-- ==========================================================================
+-- 標頭區：引入 VHDL 標準邏輯與數值運算函式庫
+-- ==========================================================================
 library IEEE;
-use IEEE.STD_LOGIC_1164.ALL;
-use IEEE.NUMERIC_STD.ALL;
+use IEEE.STD_LOGIC_1164.ALL; -- 定義標準數位邏輯訊號 ('0', '1', STD_LOGIC_VECTOR)
+use IEEE.NUMERIC_STD.ALL;    -- 支援數字加減與大小比較運算
 
+-- ==========================================================================
+-- 實體宣告 (Entity)：定義 FPGA 晶片與外部螢幕/按鍵連接的腳位介面
+-- ==========================================================================
 entity gg is
     Port ( 
-        i_clk : in  STD_LOGIC;  -- 板載主時脈 (例如 100MHz)
-        i_rst : in  STD_LOGIC;  -- 重置訊號 (高電位重置)
-        H     : out STD_LOGIC;  -- HSYNC
-        V     : out STD_LOGIC;  -- VSYNC
-        red   : out STD_LOGIC_VECTOR (3 downto 0);
-        green : out STD_LOGIC_VECTOR (3 downto 0);
-        blue  : out STD_LOGIC_VECTOR (3 downto 0)
+        i_clk : in  STD_LOGIC;                    -- 輸入：板載主時脈 (100MHz 系統心跳)
+        i_rst : in  STD_LOGIC;                    -- 輸入：系統重置按鈕 (按下去為 '1' 時全部歸零)
+        H     : out STD_LOGIC;                    -- 輸出：水平同步訊號 (HSYNC，控制螢幕換行)
+        V     : out STD_LOGIC;                    -- 輸出：垂直同步訊號 (VSYNC，控制螢幕換頁)
+        red   : out STD_LOGIC_VECTOR (3 downto 0);-- 輸出：4-bit 紅色色彩強度 (0000全暗 ~ 1111最亮)
+        green : out STD_LOGIC_VECTOR (3 downto 0);-- 輸出：4-bit 綠色色彩強度 (0000全暗 ~ 1111最亮)
+        blue  : out STD_LOGIC_VECTOR (3 downto 0) -- 輸出：4-bit 藍色色彩強度 (0000全暗 ~ 1111最亮)
     );
 end gg;
 
+-- ==========================================================================
+-- 架構實作 (Architecture)：定義 FPGA 內部的硬體電路運作邏輯
+-- ==========================================================================
 architecture Behavioral of gg is
 
-    -- 640x480 @ 60Hz 標準時序參數
-    constant H_ACT   : integer := 640;
-    constant H_FP    : integer := 16;
-    constant H_SYNC  : integer := 96;
-    constant H_BP    : integer := 48;
-    constant H_TOTAL : integer := 800; -- 640 + 16 + 96 + 48
+    -- ----------------------------------------------------------------------
+    -- 參數常數設定：VGA 640x480 @ 60Hz 工業標準時序規格
+    -- ----------------------------------------------------------------------
+    -- 水平方向 (X軸) 時間分配 (單位：像素時脈週期)
+    constant H_ACT   : integer := 640; -- 有效顯示區 (螢幕真正看得到的寬度)
+    constant H_FP    : integer := 16;  -- 前肩緩衝區 (Front Porch：畫完一排後的休息空檔)
+    constant H_SYNC  : integer := 96;  -- 水平同步脈衝區 (發送換行通知的時間長度)
+    constant H_BP    : integer := 48;  -- 後肩緩衝區 (Back Porch：換行後準備畫下一排的緩衝)
+    constant H_TOTAL : integer := 800; -- 水平掃描一整排的總週期數 (640 + 16 + 96 + 48)
 
-    constant V_ACT   : integer := 480;
-    constant V_FP    : integer := 10;
-    constant V_SYNC  : integer := 2;
-    constant V_BP    : integer := 33;
-    constant V_TOTAL : integer := 525; -- 480 + 10 + 2 + 33
+    -- 垂直方向 (Y軸) 時間分配 (單位：水平掃描行數)
+    constant V_ACT   : integer := 480; -- 有效顯示區 (螢幕真正看得到的高度)
+    constant V_FP    : integer := 10;  -- 垂直前肩緩衝區 (畫完最底下一排後的休息空檔)
+    constant V_SYNC  : integer := 2;   -- 垂直同步脈衝區 (發送回到左上角通知的時間長度)
+    constant V_BP    : integer := 33;  -- 垂直後肩緩衝區 (回到左上角後準備畫新畫面的緩衝)
+    constant V_TOTAL : integer := 525; -- 垂直掃描一整張畫面的總行數 (480 + 10 + 2 + 33)
 
-    -- 25MHz Pixel Clock 生成 (100MHz / 4 = 25MHz)
-    signal divcnt   : integer range 0 to 1 := 0;
-    signal divclk   : STD_LOGIC := '0';
+    -- ----------------------------------------------------------------------
+    -- 內部訊號宣告 (Signal)：連接各個功能區塊的內部線路與暫存器
+    -- ----------------------------------------------------------------------
+    -- 時脈除頻器專用訊號 (將 100MHz 降頻為 25MHz)
+    signal divcnt   : integer range 0 to 1 := 0; -- 除頻計數器 (只數 0 和 1)
+    signal divclk   : STD_LOGIC := '0';          -- 除頻後產生的 25MHz 像素時脈
 
-    -- 位置計數器
-    signal h_cnt : integer range 0 to H_TOTAL - 1 := 0;
-    signal v_cnt : integer range 0 to V_TOTAL - 1 := 0;
+    -- 電子束掃描位置計數器
+    signal h_cnt : integer range 0 to H_TOTAL - 1 := 0; -- 水平座標計數器 (0 數到 799)
+    signal v_cnt : integer range 0 to V_TOTAL - 1 := 0; -- 垂直座標計數器 (0 數到 524)
 
-    -- 有效顯示區域與座標
-    signal video_on   : boolean := false;
-    signal horizontal : integer := 0;
-    signal vertical   : integer := 0;
+    -- 畫面可視範圍與座標轉換訊號
+    signal video_on   : boolean := false; -- 可視範圍旗標 (true代表在640x480螢幕內)
+    signal horizontal : integer := 0;     -- 當前掃描點的 X 座標
+    signal vertical   : integer := 0;     -- 當前掃描點的 Y 座標
 
 begin
 
     ------------------------------------------------------------------
-    -- 1. 25MHz 時脈分頻器
+    -- 區塊 1：25MHz 時脈分頻器 (充當減速器，將 100MHz 除以 4)
     ------------------------------------------------------------------
     process(i_clk, i_rst)
     begin
-        if i_rst = '1' then
-            divcnt <= 0;
-            divclk <= '0';
-        elsif rising_edge(i_clk) then
-            if divcnt = 1 then
-                divcnt <= 0;
-                divclk <= not divclk;
+        if i_rst = '1' then              -- 若按下重置鈕
+            divcnt <= 0;                 -- 除頻計數器歸零
+            divclk <= '0';               -- 輸出時脈歸零
+        elsif rising_edge(i_clk) then    -- 每當 100MHz 主時脈正緣觸發時
+            if divcnt = 1 then           -- 數到 1 (代表已經過了 2 個 100MHz 週期)
+                divcnt <= 0;             -- 計數器歸零重新數
+                divclk <= not divclk;    -- 將輸出時脈反相 (0變1、1變0，完成除4降頻)
             else
-                divcnt <= divcnt + 1;
+                divcnt <= divcnt + 1;    -- 否則計數器加 1
             end if;
         end if;
     end process;
 
     ------------------------------------------------------------------
-    -- 2. 水平與垂直雙層掃描計數器
+    -- 區塊 2：水平與垂直雙層掃描計數器 (控制畫筆由左到右、由上到下移動)
     ------------------------------------------------------------------
     process(divclk, i_rst)
     begin
-        if i_rst = '1' then
-            h_cnt <= 0;
-            v_cnt <= 0;
-        elsif rising_edge(divclk) then
-            if h_cnt = H_TOTAL - 1 then
-                h_cnt <= 0;
-                if v_cnt = V_TOTAL - 1 then
-                    v_cnt <= 0;
+        if i_rst = '1' then                      -- 若按下重置鈕
+            h_cnt <= 0;                          -- 水平位置回到最左邊 (0)
+            v_cnt <= 0;                          -- 垂直位置回到最上方 (0)
+        elsif rising_edge(divclk) then           -- 每當 25MHz 像素時脈跳動一次 (畫一格)
+            if h_cnt = H_TOTAL - 1 then          -- 如果水平已經數到最右邊盡頭 (799)
+                h_cnt <= 0;                      -- 水平計數器歸零 (回到最左邊)
+                if v_cnt = V_TOTAL - 1 then      -- 同時檢查垂直是否也數到最底部盡頭 (524)
+                    v_cnt <= 0;                  -- 整張畫面畫完了，垂直歸零回到左上角
                 else
-                    v_cnt <= v_cnt + 1;
+                    v_cnt <= v_cnt + 1;          -- 還沒到底部，垂直行數往下加 1 行
                 end if;
             else
-                h_cnt <= h_cnt + 1;
+                h_cnt <= h_cnt + 1;              -- 還沒到最右邊，水平位置往右移動 1 格
             end if;
         end if;
     end process;
 
     ------------------------------------------------------------------
-    -- 3. HSYNC / VSYNC 同步訊號 (負極性脈衝)
+    -- 區塊 3：HSYNC / VSYNC 同步訊號產生器 (發出換行與換頁通知)
     ------------------------------------------------------------------
+    -- 當水平計數器走到 656 ~ 751 區間時，輸出低電位 '0' 通知螢幕換行，其餘時間維持 '1'
     H <= '0' when (h_cnt >= H_ACT + H_FP) and (h_cnt < H_ACT + H_FP + H_SYNC) else '1';
+    
+    -- 當垂直計數器走到 490 ~ 491 區間時，輸出低電位 '0' 通知螢幕回到左上角，其餘時間維持 '1'
     V <= '0' when (v_cnt >= V_ACT + V_FP) and (v_cnt < V_ACT + V_FP + V_SYNC) else '1';
 
     ------------------------------------------------------------------
-    -- 4. 有效顯示區域判定與座標定義
+    -- 區塊 4：有效顯示區域判定與座標定義 (區分螢幕內與螢幕外緩衝區)
     ------------------------------------------------------------------
+    -- 只有當水平小於 640 且垂直小於 480 時，才代表目前在看得到的螢幕範圍內
     video_on <= true when (h_cnt < H_ACT) and (v_cnt < V_ACT) else false;
     
+    -- 將計數器的數值指定給 X、Y 座標變數，方便下方畫圖邏輯閱讀
     horizontal <= h_cnt;
     vertical   <= v_cnt;
 
     ------------------------------------------------------------------
-    -- 5. 畫面渲染 (紅綠藍圖塊 + Blanking 非顯示區消隱保護)
+    -- 區塊 5：畫面渲染與消隱保護 (決定每個座標點要顯示什麼顏色)
     ------------------------------------------------------------------
     picture_display : process(horizontal, vertical, video_on)
     begin
         if video_on then
-            -- 紅色圖塊
+            -- 【在螢幕可視範圍內】：三個顏色獨立平行判斷，重疊處會自動混色
+            
+            -- 1. 紅色長方形區域 (左上偏中：X介於1~349，Y小於360)
             if vertical < 360 and horizontal < 350 and horizontal > 0 then
-                red <= "1111";
+                red <= "1111";   -- 符合範圍：紅色開到最亮
             else
-                red <= "0000";
+                red <= "0000";   -- 不符合範圍：關閉紅色
             end if;
 
-            -- 綠色圖塊
+            -- 2. 綠色長方形區域 (右上偏中：X介於251~639，Y小於360)
             if vertical < 360 and horizontal > 250 and horizontal < 640 then
-                green <= "1111";
+                green <= "1111"; -- 符合範圍：綠色開到最亮
             else
-                green <= "0000";
+                green <= "0000"; -- 不符合範圍：關閉綠色
             end if;
 
-            -- 藍色圖塊
+            -- 3. 藍色長方形區域 (中下方：X介於151~499，Y介於121~479)
             if vertical > 120 and vertical < 480 and horizontal > 150 and horizontal < 500 then
-                blue <= "1111";
+                blue <= "1111";  -- 符合範圍：藍色開到最亮
             else
-                blue <= "0000";
+                blue <= "0000";  -- 不符合範圍：關閉藍色
             end if;
+            
         else
-            -- 消隱保護：非有效顯示區域 (Sync / Porch) 強制輸出全黑 0000
+            -- 【消隱保護 Blanking】：當掃描點在螢幕邊框外的緩衝休息區時
+            -- 強制將紅、綠、藍全部切斷為 "0000" (全黑)，避免雜訊干擾螢幕同步訊號
             red   <= "0000";
             green <= "0000";
             blue  <= "0000";

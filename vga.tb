@@ -1,0 +1,81 @@
+library IEEE;
+use IEEE.STD_LOGIC_1164.ALL;
+
+entity gg_tb is
+-- Testbench 本身不需要 Port 宣告
+end gg_tb;
+
+architecture Behavior of gg_tb is
+
+    -- 1. 宣告被測元件 (UUT: Unit Under Test)
+    component gg
+        Port ( 
+            i_clk : in  STD_LOGIC;
+            i_rst : in  STD_LOGIC;
+            H     : out STD_LOGIC;
+            V     : out STD_LOGIC;
+            red   : out STD_LOGIC_VECTOR (3 downto 0);
+            green : out STD_LOGIC_VECTOR (3 downto 0);
+            blue  : out STD_LOGIC_VECTOR (3 downto 0)
+        );
+    end component;
+
+    -- 2. 宣告驅動與觀察訊號
+    signal i_clk : STD_LOGIC := '0';
+    signal i_rst : STD_LOGIC := '1'; -- 初始給予 Reset 狀態
+
+    signal H     : STD_LOGIC;
+    signal V     : STD_LOGIC;
+    signal red   : STD_LOGIC_VECTOR (3 downto 0);
+    signal green : STD_LOGIC_VECTOR (3 downto 0);
+    signal blue  : STD_LOGIC_VECTOR (3 downto 0);
+
+    -- 3. 時脈週期定義 (100MHz 主時脈 = 週期 10ns)
+    constant CLK_PERIOD : time := 10 ns;
+
+begin
+
+    -- 實例化待測模組 (UUT Instantiation)
+    uut: gg 
+    port map (
+        i_clk => i_clk,
+        i_rst => i_rst,
+        H     => H,
+        V     => V,
+        red   => red,
+        green => green,
+        blue  => blue
+    );
+
+    ------------------------------------------------------------------
+    -- 1. 主時脈訊號產生器 (100MHz)
+    ------------------------------------------------------------------
+    clk_process : process
+    begin
+        i_clk <= '0';
+        wait for CLK_PERIOD / 2;
+        i_clk <= '1';
+        wait for CLK_PERIOD / 2;
+    end process;
+
+    ------------------------------------------------------------------
+    -- 2. 重置訊號與測試流程控制
+    ------------------------------------------------------------------
+    stim_proc: process
+    begin
+        -- 保持高電位 Reset 狀態 100ns
+        i_rst <= '1';
+        wait for 100 ns;  
+        
+        -- 解除 Reset，電路開始正常運作
+        i_rst <= '0';
+
+        -- VGA 完整掃描一幀 (Frame) 大約需要 16.6 ms
+        -- 在模擬波形中觀察時，建議至少運行 1 ~ 2 個 Full Frame 觀看完整波形變化
+        wait for 35 ms;
+
+        -- 結束模擬
+        wait;
+    end process;
+
+end Behavior;
